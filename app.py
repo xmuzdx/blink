@@ -23,7 +23,6 @@ import warnings
 from scipy.signal import find_peaks
 
 # --- Page Config ---
-# Important: set_page_config should be the first Streamlit command.
 st.set_page_config(
     layout="wide",
     page_title="Mouse Blink Analysis",
@@ -79,6 +78,18 @@ st.markdown("""
         border: none;
         border-radius: var(--radius-component);
         padding: 24px;
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: var(--text2);
+        font-size: 14px;
+        font-weight: 500;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: var(--text1);
+        font-size: 28px;
+        font-weight: 600;
     }
 
     [data-testid="stHorizontalBlock"] > div {
@@ -157,49 +168,6 @@ st.markdown("""
         border-bottom: 1px solid var(--border);
     }
 
-    .info-box {
-        background-color: var(--surface1);
-        border-radius: var(--radius-component);
-        padding: 16px 20px;
-        color: var(--text2);
-        margin: 16px 0;
-    }
-
-    .info-box.success {
-        background-color: var(--success-bg);
-        color: var(--success);
-    }
-
-    .info-box.warning {
-        background-color: var(--warning-bg);
-        color: var(--warning);
-    }
-
-    .info-box.error {
-        background-color: var(--error-bg);
-        color: var(--error);
-    }
-
-    .metric-card {
-        background-color: var(--surface1);
-        border-radius: var(--radius-component);
-        padding: 20px;
-        text-align: center;
-    }
-
-    .metric-value {
-        font-size: 32px;
-        font-weight: 500;
-        color: var(--text1);
-        line-height: 1.1;
-    }
-
-    .metric-label {
-        font-size: 14px;
-        color: var(--text2);
-        margin-top: 4px;
-    }
-
     [data-testid="stSidebar"] {
         background-color: var(--surface1);
         border-right: 1px solid var(--border);
@@ -215,19 +183,6 @@ st.markdown("""
         border: none;
         border-top: 1px solid var(--border);
         margin: 24px 0;
-    }
-
-    .streamlit-expanderHeader {
-        background-color: var(--surface1);
-        border-radius: var(--radius-control);
-        color: var(--text1);
-    }
-
-    .theme-toggle {
-        position: fixed;
-        top: 20px;
-        right: 20px;
-        z-index: 999;
     }
 
     [data-testid="stDataFrame"] {
@@ -248,25 +203,6 @@ st.markdown("""
         border-color: var(--accent);
     }
 
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        border-bottom: 1px solid var(--border);
-    }
-
-    .stTabs [data-baseweb="tab"] {
-        color: var(--text3);
-        font-weight: 500;
-    }
-
-    .stTabs [data-baseweb="tab"]:hover {
-        color: var(--text2);
-    }
-
-    .stTabs [aria-selected="true"] {
-        color: var(--accent) !important;
-        border-bottom: 2px solid var(--accent);
-    }
-
     .stDownloadButton > button {
         background-color: var(--surface2);
         color: var(--text1);
@@ -277,17 +213,6 @@ st.markdown("""
 
     .stDownloadButton > button:hover {
         background-color: var(--surface3);
-    }
-
-    .stTooltipContent {
-        background-color: var(--surface2);
-        color: var(--text1);
-        border-radius: var(--radius-control);
-        padding: 8px 12px;
-    }
-
-    .js-plotly-plot .plotly .modebar {
-        background: var(--surface1);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -312,6 +237,7 @@ DB_FILE = "analysis_history.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS analysis_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -321,9 +247,27 @@ def init_db():
             zero_blinks INTEGER,
             interp_avg_min_norm REAL,
             zero_avg_min_norm REAL,
-            analysis_duration_s REAL
+            analysis_duration_s REAL,
+            mean_pfa_normalized REAL,
+            mean_minimum_pfa_normalized REAL,
+            blink_frequency_per_min REAL
         )
     ''')
+
+    existing_columns = [
+        row[1]
+        for row in c.execute("PRAGMA table_info(analysis_results)").fetchall()
+    ]
+
+    if "mean_pfa_normalized" not in existing_columns:
+        c.execute("ALTER TABLE analysis_results ADD COLUMN mean_pfa_normalized REAL")
+
+    if "mean_minimum_pfa_normalized" not in existing_columns:
+        c.execute("ALTER TABLE analysis_results ADD COLUMN mean_minimum_pfa_normalized REAL")
+
+    if "blink_frequency_per_min" not in existing_columns:
+        c.execute("ALTER TABLE analysis_results ADD COLUMN blink_frequency_per_min REAL")
+
     conn.commit()
     conn.close()
 
@@ -331,11 +275,20 @@ def init_db():
 def save_results_to_db(filename, stats):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
+
     c.execute('''
         INSERT INTO analysis_results (
-            analysis_timestamp, original_filename, interp_blinks,
-            zero_blinks, interp_avg_min_norm, zero_avg_min_norm, analysis_duration_s
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            analysis_timestamp,
+            original_filename,
+            interp_blinks,
+            zero_blinks,
+            interp_avg_min_norm,
+            zero_avg_min_norm,
+            analysis_duration_s,
+            mean_pfa_normalized,
+            mean_minimum_pfa_normalized,
+            blink_frequency_per_min
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         filename,
@@ -343,8 +296,12 @@ def save_results_to_db(filename, stats):
         stats.get('zero_blinks', 0),
         stats.get('interp_avg_min_norm'),
         stats.get('zero_avg_min_norm'),
-        stats.get('analysis_duration_s')
+        stats.get('analysis_duration_s'),
+        stats.get('mean_pfa_normalized'),
+        stats.get('mean_minimum_pfa_normalized'),
+        stats.get('blink_frequency_per_min')
     ))
+
     conn.commit()
     conn.close()
 
@@ -397,7 +354,7 @@ def load_segmentation_model(path):
         return None
 
 
-# --- Core Functions from core.py ---
+# --- Core Functions ---
 def preprocess_for_segmentation(eye_crop, input_size=(256, 256)):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     img = cv2.cvtColor(eye_crop, cv2.COLOR_BGR2RGB)
@@ -426,10 +383,6 @@ def postprocess_segmentation(output_mask, original_crop_shape, seg_threshold):
 
 
 def clean_numeric_signal(data):
-    """
-    Convert signal to safe float64 numpy array.
-    Handles NaN, inf, object dtype, and empty values.
-    """
     data = np.asarray(data, dtype=np.float64).reshape(-1)
 
     if data.size == 0:
@@ -449,15 +402,6 @@ def clean_numeric_signal(data):
 
 
 def wavelet_denoise(data, wavelet='db4', level=2):
-    """
-    Robust wavelet denoising.
-    This version prevents PyWavelets from crashing when:
-    - input is empty
-    - input contains NaN or inf
-    - input is too short
-    - requested decomposition level is too high
-    - PyWavelets raises a low-level ValueError
-    """
     data = clean_numeric_signal(data)
 
     if data.size == 0:
@@ -468,7 +412,10 @@ def wavelet_denoise(data, wavelet='db4', level=2):
 
     try:
         wavelet_obj = pywt.Wavelet(wavelet)
-        max_level = pywt.dwt_max_level(data_len=len(data), filter_len=wavelet_obj.dec_len)
+        max_level = pywt.dwt_max_level(
+            data_len=len(data),
+            filter_len=wavelet_obj.dec_len
+        )
         safe_level = min(level, max_level)
 
         if safe_level < 1:
@@ -607,7 +554,6 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     frame_data_list = []
     progress_bar = st.progress(0, text="Extracting eye features...")
 
-    # Stage 1: Extract eye area sequence frame by frame
     for frame_count in range(total_frames):
         ret, frame = cap.read()
 
@@ -722,10 +668,15 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         wlen=max(1, int(fps * 2))
     )
 
-    valley_idx_interp = find_true_valleys(raw_sig_interp, peaks_interp, valley_search_frames)
+    valley_idx_interp = find_true_valleys(
+        raw_sig_interp,
+        peaks_interp,
+        valley_search_frames
+    )
 
     # ==========================================================
     # Method 2: Zero method
+    # Still calculated, but no Method 2 graph is displayed.
     # ==========================================================
     raw_sig_zero = clean_numeric_signal(df['area'].to_numpy(dtype=np.float64))
     denoised_sig_zero = wavelet_denoise(raw_sig_zero)
@@ -749,7 +700,11 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         wlen=max(1, int(fps * 2))
     )
 
-    valley_idx_zero = find_true_valleys(raw_sig_zero, peaks_zero, valley_search_frames)
+    valley_idx_zero = find_true_valleys(
+        raw_sig_zero,
+        peaks_zero,
+        valley_search_frames
+    )
 
     # ==========================================================
     # Metrics calculation
@@ -776,13 +731,19 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
 
     interp_raw_norm_area = local_baseline_norm(raw_sig_interp, roll_max_interp)
     interp_denoise_norm_area = local_baseline_norm(denoised_sig_interp, roll_max_interp)
+
     zero_raw_norm_area = local_baseline_norm(raw_sig_zero, roll_max_zero)
     zero_denoise_norm_area = local_baseline_norm(denoised_sig_zero, roll_max_zero)
+
+    duration = float(df['timestamp'].max())
+
+    mean_pfa_normalized = float(interp_raw_norm_area)
+    mean_minimum_pfa_normalized = float(interp_avg_min_norm)
+    blink_frequency_per_min = (len(peaks_interp) / duration * 60) if duration > 0 else 0.0
 
     # ==========================================================
     # Visualization
     # Only Method 1 is displayed on the website.
-    # Method 2 is still calculated for metrics/history, but not plotted.
     # ==========================================================
     raw_sig_interp_norm, interp_fixed_baseline = normalize_by_initial_baseline(
         raw_sig_interp,
@@ -801,7 +762,7 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     ax1.plot(
         df['timestamp'],
         raw_sig_interp_norm,
-        label='Raw normalized (Interpolated)',
+        label='Raw normalized',
         color='lightgray',
         alpha=0.6
     )
@@ -839,23 +800,22 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
             color='red',
             s=80,
             zorder=5,
-            label='Blink valley normalized'
+            label='Blink valley'
         )
 
-    ax1.set_title(f'Method 1: Missing values INTERPOLATED | Blinks: {len(peaks_interp)}')
+    ax1.set_title(f'Palpebral Fissure Area Signal | Blinks: {len(peaks_interp)}')
     ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Normalized Eye Area')
+    ax1.set_ylabel('Normalized Palpebral Fissure Area')
     ax1.set_ylim(0, 1.2)
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
 
     plt.tight_layout()
 
-    duration = float(df['timestamp'].max())
-
     stats = {
         "filename": original_filename,
         "analysis_duration_s": round(duration, 2),
+
         "interp_blinks": int(len(peaks_interp)),
         "interp_avg_min_area": round(float(interp_avg_min_area), 2),
         "interp_avg_min_norm": round(float(interp_avg_min_norm), 4),
@@ -863,6 +823,7 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         "interp_raw_norm_area": round(float(interp_raw_norm_area), 4),
         "interp_denoise_avg_area": round(float(np.mean(denoised_sig_interp)), 2),
         "interp_denoise_norm_area": round(float(interp_denoise_norm_area), 4),
+
         "zero_blinks": int(len(peaks_zero)),
         "zero_avg_min_area": round(float(zero_avg_min_area), 2),
         "zero_avg_min_norm": round(float(zero_avg_min_norm), 4),
@@ -870,6 +831,10 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         "zero_raw_norm_area": round(float(zero_raw_norm_area), 4),
         "zero_denoise_avg_area": round(float(np.mean(denoised_sig_zero)), 2),
         "zero_denoise_norm_area": round(float(zero_denoise_norm_area), 4),
+
+        "mean_pfa_normalized": round(mean_pfa_normalized, 4),
+        "mean_minimum_pfa_normalized": round(mean_minimum_pfa_normalized, 4),
+        "blink_frequency_per_min": round(blink_frequency_per_min, 2),
     }
 
     return None, df, fig, stats
@@ -882,7 +847,7 @@ def show_main_app():
         unsafe_allow_html=True
     )
     st.markdown(
-        '<p class="sub-header">Advanced signal processing for eye closure detection using wavelet transform and dynamic baseline analysis.</p>',
+        '<p class="sub-header">Advanced signal processing for normalized palpebral fissure area and blink frequency analysis.</p>',
         unsafe_allow_html=True
     )
 
@@ -1014,58 +979,30 @@ def show_main_app():
             unsafe_allow_html=True
         )
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
 
         with col1:
             st.metric(
-                "Method 1 Blinks",
-                f"{stats['interp_blinks']}",
-                help="Using linear interpolation for missing frames"
+                "Mean PFA (Normalized)",
+                f"{stats.get('mean_pfa_normalized', 0):.4f}",
+                help="Mean palpebral fissure area normalized by the local baseline."
             )
 
         with col2:
             st.metric(
-                "Method 2 Blinks",
-                f"{stats['zero_blinks']}",
-                help="Using zero for missing frames"
+                "Mean Minimum PFA (Normalized)",
+                f"{stats.get('mean_minimum_pfa_normalized', 0):.4f}",
+                help="Mean minimum palpebral fissure area at detected blink valleys, normalized by the local baseline."
             )
 
         with col3:
-            interp_norm = stats.get('interp_avg_min_norm', 0)
             st.metric(
-                "Avg Blink Depth",
-                f"{interp_norm:.2%}",
-                help="Average normalized area at blink valleys"
-            )
-
-        with col4:
-            duration = stats.get('analysis_duration_s', 0)
-            blink_rate = (
-                stats.get('interp_blinks', 0) / duration * 60
-                if duration > 0
-                else 0
-            )
-            st.metric(
-                "Blink Rate",
-                f"{blink_rate:.1f}/min",
-                help="Blinks per minute"
+                "Blink Frequency",
+                f"{stats.get('blink_frequency_per_min', 0):.2f} /min",
+                help="Blink frequency calculated as blinks per minute."
             )
 
         st.markdown("---")
-
-        sub_col1, sub_col2, sub_col3, sub_col4 = st.columns(4)
-
-        with sub_col1:
-            st.metric("Duration", f"{stats.get('analysis_duration_s', 0):.2f}s")
-
-        with sub_col2:
-            st.metric("Interp Norm", f"{stats.get('interp_raw_norm_area', 0):.4f}")
-
-        with sub_col3:
-            st.metric("Zero Norm", f"{stats.get('zero_raw_norm_area', 0):.4f}")
-
-        with sub_col4:
-            st.metric("Denoise Norm", f"{stats.get('interp_denoise_norm_area', 0):.4f}")
 
         st.markdown("### Signal Processing Visualization")
         st.pyplot(results_fig)
@@ -1095,15 +1032,39 @@ def show_main_app():
 
     if not history_df.empty:
         display_df = history_df.copy()
+
+        if "mean_pfa_normalized" not in display_df.columns:
+            display_df["mean_pfa_normalized"] = np.nan
+
+        if "mean_minimum_pfa_normalized" not in display_df.columns:
+            display_df["mean_minimum_pfa_normalized"] = display_df.get(
+                "interp_avg_min_norm",
+                np.nan
+            )
+
+        if "blink_frequency_per_min" not in display_df.columns:
+            display_df["blink_frequency_per_min"] = np.where(
+                display_df["analysis_duration_s"] > 0,
+                display_df["interp_blinks"] / display_df["analysis_duration_s"] * 60,
+                0
+            )
+
+        display_df = display_df[[
+            "id",
+            "analysis_timestamp",
+            "original_filename",
+            "mean_pfa_normalized",
+            "mean_minimum_pfa_normalized",
+            "blink_frequency_per_min"
+        ]]
+
         display_df.columns = [
-            'ID',
-            'Timestamp',
-            'Filename',
-            'Method1 Blinks',
-            'Method2 Blinks',
-            'Interp Norm',
-            'Zero Norm',
-            'Duration'
+            "ID",
+            "Timestamp",
+            "Filename",
+            "Mean PFA (Normalized)",
+            "Mean Minimum PFA (Normalized)",
+            "Blink Frequency (Blinks/min)"
         ]
 
         st.dataframe(display_df, use_container_width=True)
@@ -1125,7 +1086,7 @@ def show_main_app():
     st.markdown("---")
     st.markdown(
         "<p style='text-align: center; color: var(--text3); font-size: 12px;'>"
-        "Mouse Blink Analysis Platform · Powered by Wavelet Transform Signal Processing"
+        "Mouse Blink Analysis Platform · Mean PFA · Mean Minimum PFA · Blink Frequency"
         "</p>",
         unsafe_allow_html=True
     )
