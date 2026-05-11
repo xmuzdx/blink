@@ -1,3 +1,11 @@
+import subprocess
+import sys
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install",
+    "--force-reinstall",
+    "--no-cache-dir",
+    "opencv-python-headless>=4.10.0.84"
+])
 """
 Mouse Blink Analysis Platform
 Integrates advanced signal processing from core.py with Anthropic-inspired warm design
