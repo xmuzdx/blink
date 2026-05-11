@@ -301,6 +301,7 @@ except Exception as e:
     class MyCustomFPN:
         pass
 
+
 # --- Global Constants ---
 YOLO_MODEL_FILENAME = "detection model.pt"
 SEG_MODEL_FILENAME = "segmentation model.pth"
@@ -444,14 +445,12 @@ def clean_numeric_signal(data):
         data = np.interp(x, x[valid], data[valid])
 
     data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
-
     return data.astype(np.float64)
 
 
 def wavelet_denoise(data, wavelet='db4', level=2):
     """
     Robust wavelet denoising.
-
     This version prevents PyWavelets from crashing when:
     - input is empty
     - input contains NaN or inf
@@ -782,6 +781,8 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
 
     # ==========================================================
     # Visualization
+    # Only Method 1 is displayed on the website.
+    # Method 2 is still calculated for metrics/history, but not plotted.
     # ==========================================================
     raw_sig_interp_norm, interp_fixed_baseline = normalize_by_initial_baseline(
         raw_sig_interp,
@@ -791,20 +792,10 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     denoised_sig_interp_norm = denoised_sig_interp / interp_fixed_baseline
     roll_max_interp_norm = roll_max_interp / interp_fixed_baseline
 
-    raw_sig_zero_norm, zero_fixed_baseline = normalize_by_initial_baseline(
-        raw_sig_zero,
-        fps,
-        config['BASELINE_WINDOW_SEC']
-    )
-    denoised_sig_zero_norm = denoised_sig_zero / zero_fixed_baseline
-    roll_max_zero_norm = roll_max_zero / zero_fixed_baseline
-
-    fig, (ax1, ax2) = plt.subplots(
-        2,
+    fig, ax1 = plt.subplots(
         1,
-        figsize=(14, 11),
-        sharex=True,
-        gridspec_kw={'hspace': 0.38}
+        1,
+        figsize=(14, 6)
     )
 
     ax1.plot(
@@ -814,6 +805,7 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         color='lightgray',
         alpha=0.6
     )
+
     ax1.plot(
         df['timestamp'],
         roll_max_interp_norm,
@@ -822,6 +814,7 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         linestyle='--',
         alpha=0.7
     )
+
     ax1.plot(
         df['timestamp'],
         denoised_sig_interp_norm,
@@ -829,6 +822,7 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         color='blue',
         linewidth=1.5
     )
+
     ax1.axhline(
         1.0,
         color='black',
@@ -851,60 +845,11 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     ax1.set_title(f'Method 1: Missing values INTERPOLATED | Blinks: {len(peaks_interp)}')
     ax1.set_xlabel('Time (s)')
     ax1.set_ylabel('Normalized Eye Area')
-    ax1.tick_params(axis='x', which='both', labelbottom=True)
     ax1.set_ylim(0, 1.2)
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
 
-    ax2.plot(
-        df['timestamp'],
-        raw_sig_zero_norm,
-        label='Raw normalized (Direct 0)',
-        color='lightgray',
-        alpha=0.6
-    )
-    ax2.plot(
-        df['timestamp'],
-        roll_max_zero_norm,
-        label='Baseline normalized',
-        color='green',
-        linestyle='--',
-        alpha=0.7
-    )
-    ax2.plot(
-        df['timestamp'],
-        denoised_sig_zero_norm,
-        label='Denoised normalized',
-        color='purple',
-        linewidth=1.5
-    )
-    ax2.axhline(
-        1.0,
-        color='black',
-        linestyle=':',
-        linewidth=1,
-        alpha=0.6,
-        label='Initial baseline = 1'
-    )
-
-    if len(valley_idx_zero) > 0:
-        ax2.scatter(
-            df['timestamp'].iloc[valley_idx_zero],
-            raw_sig_zero_norm[valley_idx_zero],
-            color='red',
-            s=80,
-            zorder=5,
-            label='Blink valley normalized'
-        )
-
-    ax2.set_title(f'Method 2: Missing values kept as ZERO | Blinks: {len(peaks_zero)}')
-    ax2.set_xlabel('Time (s)')
-    ax2.set_ylabel('Normalized Eye Area')
-    ax2.set_ylim(0, 1.2)
-    ax2.legend(loc='upper right')
-    ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout(h_pad=3.0)
+    plt.tight_layout()
 
     duration = float(df['timestamp'].max())
 
