@@ -890,4 +890,301 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     if len(valley_idx_zero) > 0:
         ax2.scatter(
             df['timestamp'].iloc[valley_idx_zero],
-            raw_sig_zero_norm[valley_idx
+            raw_sig_zero_norm[valley_idx_zero],
+            color='red',
+            s=80,
+            zorder=5,
+            label='Blink valley normalized'
+        )
+
+    ax2.set_title(f'Method 2: Missing values kept as ZERO | Blinks: {len(peaks_zero)}')
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Normalized Eye Area')
+    ax2.set_ylim(0, 1.2)
+    ax2.legend(loc='upper right')
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout(h_pad=3.0)
+
+    duration = float(df['timestamp'].max())
+
+    stats = {
+        "filename": original_filename,
+        "analysis_duration_s": round(duration, 2),
+        "interp_blinks": int(len(peaks_interp)),
+        "interp_avg_min_area": round(float(interp_avg_min_area), 2),
+        "interp_avg_min_norm": round(float(interp_avg_min_norm), 4),
+        "interp_raw_avg_area": round(float(np.mean(raw_sig_interp)), 2),
+        "interp_raw_norm_area": round(float(interp_raw_norm_area), 4),
+        "interp_denoise_avg_area": round(float(np.mean(denoised_sig_interp)), 2),
+        "interp_denoise_norm_area": round(float(interp_denoise_norm_area), 4),
+        "zero_blinks": int(len(peaks_zero)),
+        "zero_avg_min_area": round(float(zero_avg_min_area), 2),
+        "zero_avg_min_norm": round(float(zero_avg_min_norm), 4),
+        "zero_raw_avg_area": round(float(np.mean(raw_sig_zero)), 2),
+        "zero_raw_norm_area": round(float(zero_raw_norm_area), 4),
+        "zero_denoise_avg_area": round(float(np.mean(denoised_sig_zero)), 2),
+        "zero_denoise_norm_area": round(float(zero_denoise_norm_area), 4),
+    }
+
+    return None, df, fig, stats
+
+
+# --- Main App ---
+def show_main_app():
+    st.markdown(
+        '<h1 class="main-header">👁 Mouse Blink Analysis</h1>',
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        '<p class="sub-header">Advanced signal processing for eye closure detection using wavelet transform and dynamic baseline analysis.</p>',
+        unsafe_allow_html=True
+    )
+
+    if 'analysis_results' not in st.session_state:
+        st.session_state.analysis_results = None
+
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("### Upload Video")
+
+        uploaded_file = st.file_uploader(
+            "Select a video file",
+            type=["mp4", "avi", "mov"],
+            label_visibility="collapsed"
+        )
+
+        if uploaded_file is not None:
+            st.session_state.analysis_results = None
+
+        st.markdown("---")
+        st.markdown("### Analysis Parameters")
+
+        drop_ratio = st.slider(
+            "Blink Depth Sensitivity",
+            min_value=0.10,
+            max_value=0.90,
+            value=0.30,
+            step=0.05,
+            help="Threshold for identifying a blink. Higher value = only deep closures count."
+        )
+
+        baseline_window = st.slider(
+            "Baseline Window (seconds)",
+            min_value=0.5,
+            max_value=10.0,
+            value=1.2,
+            step=0.1,
+            help="How many seconds to look back/forward to determine the normal open area."
+        )
+
+        valley_search = st.slider(
+            "Valley Search Window",
+            min_value=1,
+            max_value=20,
+            value=8,
+            step=1,
+            help="Frames to search forward for true blink valley after peak."
+        )
+
+        st.markdown("---")
+
+        start_button = st.button(
+            "🚀 Start Analysis",
+            disabled=(uploaded_file is None),
+            use_container_width=True
+        )
+
+    if start_button:
+        init_db()
+
+        if uploaded_file is not None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmpfile:
+                tmpfile.write(uploaded_file.getvalue())
+                video_path = tmpfile.name
+
+            try:
+                with st.spinner("Loading AI models..."):
+                    yolo_model = load_detection_model(YOLO_MODEL_FILENAME)
+                    seg_model = load_segmentation_model(SEG_MODEL_FILENAME)
+
+                if yolo_model is None:
+                    st.error(f"YOLO model not found or failed to load: {YOLO_MODEL_FILENAME}")
+                    return
+
+                if seg_model is None:
+                    st.error(f"Segmentation model not found or failed to load: {SEG_MODEL_FILENAME}")
+                    return
+
+                config = {
+                    'YOLO_CONF_THRESHOLD': 0.6,
+                    'SEG_THRESHOLD': 0.4,
+                    'DROP_RATIO': drop_ratio,
+                    'BASELINE_WINDOW_SEC': baseline_window,
+                    'VALLEY_SEARCH_FRAMES': valley_search
+                }
+
+                video_bytes, results_df, results_fig, stats = run_analysis(
+                    video_path,
+                    uploaded_file.name,
+                    yolo_model,
+                    seg_model,
+                    config
+                )
+
+                if video_bytes or results_df is not None:
+                    st.session_state.analysis_results = {
+                        "video_bytes": video_bytes,
+                        "results_df": results_df,
+                        "results_fig": results_fig,
+                        "stats": stats
+                    }
+
+                    try:
+                        save_results_to_db(uploaded_file.name, stats)
+                        st.success("Analysis complete and saved to history.")
+                    except Exception as e:
+                        st.warning(f"Could not save to database: {e}")
+                else:
+                    st.error(
+                        "Analysis failed. No valid eye area signal was detected. "
+                        "Please try a clearer video with the eye visible for most frames."
+                    )
+
+            except Exception as e:
+                st.error(f"Analysis failed due to an unexpected error: {e}")
+
+            finally:
+                if os.path.exists(video_path):
+                    os.remove(video_path)
+
+    if st.session_state.analysis_results:
+        results = st.session_state.analysis_results
+        stats = results["stats"]
+        results_df = results["results_df"]
+        results_fig = results["results_fig"]
+
+        st.markdown(
+            '<h2 class="section-header">Analysis Results</h2>',
+            unsafe_allow_html=True
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric(
+                "Method 1 Blinks",
+                f"{stats['interp_blinks']}",
+                help="Using linear interpolation for missing frames"
+            )
+
+        with col2:
+            st.metric(
+                "Method 2 Blinks",
+                f"{stats['zero_blinks']}",
+                help="Using zero for missing frames"
+            )
+
+        with col3:
+            interp_norm = stats.get('interp_avg_min_norm', 0)
+            st.metric(
+                "Avg Blink Depth",
+                f"{interp_norm:.2%}",
+                help="Average normalized area at blink valleys"
+            )
+
+        with col4:
+            duration = stats.get('analysis_duration_s', 0)
+            blink_rate = (
+                stats.get('interp_blinks', 0) / duration * 60
+                if duration > 0
+                else 0
+            )
+            st.metric(
+                "Blink Rate",
+                f"{blink_rate:.1f}/min",
+                help="Blinks per minute"
+            )
+
+        st.markdown("---")
+
+        sub_col1, sub_col2, sub_col3, sub_col4 = st.columns(4)
+
+        with sub_col1:
+            st.metric("Duration", f"{stats.get('analysis_duration_s', 0):.2f}s")
+
+        with sub_col2:
+            st.metric("Interp Norm", f"{stats.get('interp_raw_norm_area', 0):.4f}")
+
+        with sub_col3:
+            st.metric("Zero Norm", f"{stats.get('zero_raw_norm_area', 0):.4f}")
+
+        with sub_col4:
+            st.metric("Denoise Norm", f"{stats.get('interp_denoise_norm_area', 0):.4f}")
+
+        st.markdown("### Signal Processing Visualization")
+        st.pyplot(results_fig)
+
+        buf = BytesIO()
+        results_fig.savefig(buf, format="png", dpi=300, bbox_inches='tight')
+        buf.seek(0)
+
+        st.download_button(
+            "📥 Download HD Plot",
+            buf.getvalue(),
+            f"{stats.get('filename', 'analysis')}_plot.png",
+            "image/png",
+            use_container_width=True
+        )
+
+        st.markdown("### Frame-by-Frame Data")
+
+        with st.expander("View detailed data", expanded=False):
+            st.dataframe(results_df, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### Analysis History")
+
+    init_db()
+    history_df = load_results_from_db()
+
+    if not history_df.empty:
+        display_df = history_df.copy()
+        display_df.columns = [
+            'ID',
+            'Timestamp',
+            'Filename',
+            'Method1 Blinks',
+            'Method2 Blinks',
+            'Interp Norm',
+            'Zero Norm',
+            'Duration'
+        ]
+
+        st.dataframe(display_df, use_container_width=True)
+
+        csv_buffer = BytesIO()
+        display_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
+        csv_buffer.seek(0)
+
+        st.download_button(
+            "📥 Download History CSV",
+            csv_buffer.getvalue(),
+            "analysis_history.csv",
+            "text/csv",
+            use_container_width=True
+        )
+    else:
+        st.info("No analysis history yet. Upload a video to get started.")
+
+    st.markdown("---")
+    st.markdown(
+        "<p style='text-align: center; color: var(--text3); font-size: 12px;'>"
+        "Mouse Blink Analysis Platform · Powered by Wavelet Transform Signal Processing"
+        "</p>",
+        unsafe_allow_html=True
+    )
+
+
+if __name__ == "__main__":
+    show_main_app()
