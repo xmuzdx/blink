@@ -1,6 +1,7 @@
 """
 Mouse Blink Analysis Platform
 Integrates advanced signal processing from core.py with Anthropic-inspired warm design
+
 """
 
 import cv2
@@ -22,6 +23,18 @@ import pywt
 import warnings
 from scipy.signal import find_peaks
 
+# --- Auth imports ---
+import re
+import time
+import random
+import string
+import smtplib
+import ssl
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import bcrypt
+
+
 # --- Page Config ---
 st.set_page_config(
     layout="wide",
@@ -29,6 +42,7 @@ st.set_page_config(
     page_icon="👁",
     initial_sidebar_state="expanded"
 )
+
 
 # --- Anthropic Design System CSS ---
 st.markdown("""
@@ -59,46 +73,39 @@ st.markdown("""
         --font-display: "Inter", system-ui, sans-serif;
         --font-mono: "JetBrains Mono", monospace;
     }
-
     .stApp {
         background-color: var(--background);
         color: var(--text1);
         font-family: var(--font-display);
     }
-
     h1, h2, h3, h4, h5, h6 {
         color: var(--text1);
         font-weight: 500;
         letter-spacing: 0;
         line-height: 1.3;
     }
-
     [data-testid="stMetric"] {
         background-color: var(--surface1);
         border: none;
         border-radius: var(--radius-component);
         padding: 24px;
     }
-
     [data-testid="stMetricLabel"] {
         color: var(--text2);
         font-size: 14px;
         font-weight: 500;
     }
-
     [data-testid="stMetricValue"] {
         color: var(--text1);
         font-size: 28px;
         font-weight: 600;
     }
-
     [data-testid="stHorizontalBlock"] > div {
         background-color: var(--surface1);
         border-radius: var(--radius-component);
         padding: 16px;
         margin: 4px;
     }
-
     .stButton > button {
         background-color: var(--text1);
         color: var(--background);
@@ -109,22 +116,18 @@ st.markdown("""
         font-size: 14px;
         transition: all 150ms ease-out;
     }
-
     .stButton > button:hover {
         background-color: var(--surface2);
         transform: scale(0.98);
     }
-
     .stButton > button:active {
         transform: scale(0.96);
     }
-
     .stButton > button[kind="secondary"] {
         background-color: transparent;
         color: var(--text1);
         border: 1px solid var(--border);
     }
-
     [data-testid="stFileUploadDropzone"] {
         background-color: var(--surface1);
         border: 2px dashed var(--border);
@@ -132,18 +135,15 @@ st.markdown("""
         padding: 32px;
         transition: all 150ms ease-out;
     }
-
     [data-testid="stFileUploadDropzone"]:hover {
         border-color: var(--accent);
         background-color: var(--accent-subtle);
     }
-
     [data-testid="stSlider"] label {
         color: var(--text2);
         font-size: 14px;
         font-weight: 500;
     }
-
     .main-header {
         font-size: 36px;
         font-weight: 500;
@@ -151,13 +151,11 @@ st.markdown("""
         margin-bottom: 8px;
         line-height: 1.2;
     }
-
     .sub-header {
         font-size: 16px;
         color: var(--text2);
         margin-bottom: 32px;
     }
-
     .section-header {
         font-size: 20px;
         font-weight: 500;
@@ -167,42 +165,34 @@ st.markdown("""
         padding-bottom: 8px;
         border-bottom: 1px solid var(--border);
     }
-
     [data-testid="stSidebar"] {
         background-color: var(--surface1);
         border-right: 1px solid var(--border);
     }
-
     [data-testid="stSidebar"] h1,
     [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3 {
         color: var(--text1);
     }
-
     hr {
         border: none;
         border-top: 1px solid var(--border);
         margin: 24px 0;
     }
-
     [data-testid="stDataFrame"] {
         background-color: var(--surface1);
         border-radius: var(--radius-component);
     }
-
     [data-testid="stVideo"] {
         border-radius: var(--radius-component);
         overflow: hidden;
     }
-
     .stProgress > div > div {
         background-color: var(--accent);
     }
-
     .stSpinner > div {
         border-color: var(--accent);
     }
-
     .stDownloadButton > button {
         background-color: var(--surface2);
         color: var(--text1);
@@ -210,12 +200,12 @@ st.markdown("""
         border-radius: var(--radius-control);
         padding: 10px 16px;
     }
-
     .stDownloadButton > button:hover {
         background-color: var(--surface3);
     }
 </style>
 """, unsafe_allow_html=True)
+
 
 # --- Import custom segmentation model ---
 try:
@@ -233,14 +223,177 @@ SEG_MODEL_FILENAME = "segmentation model.pth"
 DB_FILE = "analysis_history.db"
 
 
-# --- Database Functions ---
+# ==========================================================
+# Auth Helper Functions
+# ==========================================================
+
+def get_secret(name, default=""):
+    """
+    Read config from Streamlit secrets first, then environment variables.
+
+    Streamlit Cloud Secrets can be:
+    SMTP_HOST = "smtp.gmail.com"
+
+    Or:
+    [smtp]
+    host = "smtp.gmail.com"
+    """
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+
+    try:
+        if "smtp" in st.secrets:
+            key_map = {
+                "SMTP_HOST": "host",
+                "SMTP_PORT": "port",
+                "SMTP_USER": "user",
+                "SMTP_PASSWORD": "password",
+                "SMTP_FROM": "from",
+            }
+            smtp_key = key_map.get(name)
+            if smtp_key and smtp_key in st.secrets["smtp"]:
+                return st.secrets["smtp"][smtp_key]
+    except Exception:
+        pass
+
+    return os.environ.get(name, default)
+
+
+def is_valid_email(email):
+    email = email.strip().lower()
+    pattern = r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
+    return bool(re.match(pattern, email))
+
+
+def hash_password(password):
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def verify_password(password, hashed_password):
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except Exception:
+        return False
+
+
+def generate_verification_code():
+    return "".join(random.choices(string.digits, k=6))
+
+
+def send_verification_email(to_email, code):
+    smtp_host = str(get_secret("SMTP_HOST", "")).strip()
+    smtp_port = int(get_secret("SMTP_PORT", "587"))
+    smtp_user = str(get_secret("SMTP_USER", "")).strip()
+    smtp_password = str(get_secret("SMTP_PASSWORD", "")).strip()
+    smtp_from = str(get_secret("SMTP_FROM", smtp_user)).strip()
+
+    if not smtp_host or not smtp_user or not smtp_password or not smtp_from:
+        return False, (
+            "SMTP 邮件配置不完整。请在云平台的 Secrets / Environment Variables 中配置 "
+            "SMTP_HOST、SMTP_PORT、SMTP_USER、SMTP_PASSWORD、SMTP_FROM。"
+        )
+
+    subject = "Mouse Blink Analysis 注册验证码"
+
+    text_body = f"""
+您好！
+
+您的注册验证码是：
+
+{code}
+
+该验证码 10 分钟内有效，请勿泄露给他人。
+
+如果这不是您本人操作，请忽略此邮件。
+
+Mouse Blink Analysis Platform
+""".strip()
+
+    html_body = f"""
+    <div style="font-family: Arial, sans-serif; color: #1F1815; line-height: 1.6;">
+        <h2>Mouse Blink Analysis 注册验证码</h2>
+        <p>您好！</p>
+        <p>您的注册验证码是：</p>
+        <div style="
+            font-size: 28px;
+            font-weight: bold;
+            letter-spacing: 4px;
+            background: #F7F0E8;
+            padding: 16px 24px;
+            border-radius: 8px;
+            display: inline-block;
+            color: #B85C38;
+        ">
+            {code}
+        </div>
+        <p>该验证码 <strong>10 分钟内有效</strong>，请勿泄露给他人。</p>
+        <p>如果这不是您本人操作，请忽略此邮件。</p>
+        <p style="color: #7A6252; font-size: 12px;">
+            Mouse Blink Analysis Platform
+        </p>
+    </div>
+    """
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = smtp_from
+        msg["To"] = to_email
+        msg.attach(MIMEText(text_body, "plain", "utf-8"))
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+        context = ssl.create_default_context()
+
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            server.ehlo()
+            server.starttls(context=context)
+            server.ehlo()
+            server.login(smtp_user, smtp_password)
+            server.sendmail(smtp_from, [to_email], msg.as_string())
+
+        return True, "验证码已发送，请检查邮箱。"
+
+    except smtplib.SMTPAuthenticationError:
+        return False, "SMTP 认证失败。请检查发件邮箱和应用专用密码是否正确。"
+    except Exception as e:
+        return False, f"验证码发送失败：{e}"
+
+
+# ==========================================================
+# Database Functions
+# ==========================================================
+
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
     c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    ''')
+
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS verification_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL,
+            code TEXT NOT NULL,
+            created_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            used INTEGER DEFAULT 0
+        )
+    ''')
+
+    c.execute('''
         CREATE TABLE IF NOT EXISTS analysis_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             analysis_timestamp TEXT NOT NULL,
             original_filename TEXT NOT NULL,
             interp_blinks INTEGER,
@@ -250,7 +403,8 @@ def init_db():
             analysis_duration_s REAL,
             mean_pfa_normalized REAL,
             mean_minimum_pfa_normalized REAL,
-            blink_frequency_per_min REAL
+            blink_frequency_per_min REAL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
         )
     ''')
 
@@ -258,6 +412,9 @@ def init_db():
         row[1]
         for row in c.execute("PRAGMA table_info(analysis_results)").fetchall()
     ]
+
+    if "user_id" not in existing_columns:
+        c.execute("ALTER TABLE analysis_results ADD COLUMN user_id INTEGER")
 
     if "mean_pfa_normalized" not in existing_columns:
         c.execute("ALTER TABLE analysis_results ADD COLUMN mean_pfa_normalized REAL")
@@ -272,12 +429,142 @@ def init_db():
     conn.close()
 
 
-def save_results_to_db(filename, stats):
+def user_exists(email):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    row = c.execute(
+        "SELECT id FROM users WHERE email = ?",
+        (email.strip().lower(),)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def save_verification_code(email, code):
+    email = email.strip().lower()
+    now = time.time()
+    expires_at = now + 10 * 60
+
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
 
+    c.execute(
+        "DELETE FROM verification_codes WHERE email = ? AND expires_at < ?",
+        (email, now)
+    )
+
+    c.execute('''
+        INSERT INTO verification_codes (email, code, created_at, expires_at, used)
+        VALUES (?, ?, ?, ?, 0)
+    ''', (email, code, now, expires_at))
+
+    conn.commit()
+    conn.close()
+
+
+def check_verification_code(email, code):
+    email = email.strip().lower()
+    code = code.strip()
+    now = time.time()
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    row = c.execute('''
+        SELECT id, expires_at, used
+        FROM verification_codes
+        WHERE email = ? AND code = ?
+        ORDER BY id DESC
+        LIMIT 1
+    ''', (email, code)).fetchone()
+
+    if not row:
+        conn.close()
+        return False, "验证码错误，请重新输入。"
+
+    code_id, expires_at, used = row
+
+    if used:
+        conn.close()
+        return False, "验证码已使用，请重新获取。"
+
+    if now > expires_at:
+        conn.close()
+        return False, "验证码已过期，请重新获取。"
+
+    c.execute(
+        "UPDATE verification_codes SET used = 1 WHERE id = ?",
+        (code_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    return True, "验证码验证成功。"
+
+
+def register_user(email, password):
+    email = email.strip().lower()
+
+    if not is_valid_email(email):
+        return False, "请输入有效邮箱。"
+
+    if len(password) < 6:
+        return False, "密码至少需要 6 位。"
+
+    if user_exists(email):
+        return False, "该邮箱已注册，请直接登录。"
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    try:
+        c.execute('''
+            INSERT INTO users (email, password_hash, created_at)
+            VALUES (?, ?, ?)
+        ''', (
+            email,
+            hash_password(password),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        conn.commit()
+        return True, "注册成功，请登录。"
+    except Exception as e:
+        return False, f"注册失败：{e}"
+    finally:
+        conn.close()
+
+
+def authenticate_user(email, password):
+    email = email.strip().lower()
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    row = c.execute('''
+        SELECT id, email, password_hash
+        FROM users
+        WHERE email = ?
+    ''', (email,)).fetchone()
+
+    conn.close()
+
+    if not row:
+        return False, None, "该邮箱尚未注册。"
+
+    user_id, user_email, password_hash_value = row
+
+    if not verify_password(password, password_hash_value):
+        return False, None, "密码错误。"
+
+    return True, {"id": user_id, "email": user_email}, "登录成功。"
+
+
+def save_results_to_db(user_id, filename, stats):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     c.execute('''
         INSERT INTO analysis_results (
+            user_id,
             analysis_timestamp,
             original_filename,
             interp_blinks,
@@ -288,8 +575,9 @@ def save_results_to_db(filename, stats):
             mean_pfa_normalized,
             mean_minimum_pfa_normalized,
             blink_frequency_per_min
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
+        user_id,
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         filename,
         stats.get('interp_blinks', 0),
@@ -301,20 +589,52 @@ def save_results_to_db(filename, stats):
         stats.get('mean_minimum_pfa_normalized'),
         stats.get('blink_frequency_per_min')
     ))
-
     conn.commit()
     conn.close()
 
 
-def load_results_from_db():
+def load_results_from_db(user_id):
     if not os.path.exists(DB_FILE):
         return pd.DataFrame()
 
     conn = sqlite3.connect(DB_FILE)
+
     try:
-        return pd.read_sql_query("SELECT * FROM analysis_results ORDER BY id DESC", conn)
+        return pd.read_sql_query(
+            """
+            SELECT *
+            FROM analysis_results
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
+            conn,
+            params=(user_id,)
+        )
     except Exception:
         return pd.DataFrame()
+    finally:
+        conn.close()
+
+
+def delete_analysis_records(user_id, record_ids):
+    if not record_ids:
+        return False, "请选择要删除的记录。"
+
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+
+    try:
+        placeholders = ",".join(["?"] * len(record_ids))
+        query = f"""
+            DELETE FROM analysis_results
+            WHERE user_id = ?
+            AND id IN ({placeholders})
+        """
+        c.execute(query, [user_id] + list(record_ids))
+        conn.commit()
+        return True, f"已删除 {c.rowcount} 条记录。"
+    except Exception as e:
+        return False, f"删除失败：{e}"
     finally:
         conn.close()
 
@@ -324,7 +644,6 @@ def load_results_from_db():
 def load_detection_model(path):
     if not os.path.exists(path):
         return None
-
     try:
         return YOLO(path)
     except Exception as e:
@@ -336,7 +655,6 @@ def load_detection_model(path):
 def load_segmentation_model(path):
     if not os.path.exists(path):
         return None
-
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         model = MyCustomFPN(
@@ -358,7 +676,6 @@ def load_segmentation_model(path):
 def preprocess_for_segmentation(eye_crop, input_size=(256, 256)):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     img = cv2.cvtColor(eye_crop, cv2.COLOR_BGR2RGB)
-
     transform = T.Compose([
         T.ToPILImage(),
         T.Resize(input_size),
@@ -368,7 +685,6 @@ def preprocess_for_segmentation(eye_crop, input_size=(256, 256)):
             std=[0.229, 0.224, 0.225]
         )
     ])
-
     return transform(img).unsqueeze(0).to(device)
 
 
@@ -384,16 +700,13 @@ def postprocess_segmentation(output_mask, original_crop_shape, seg_threshold):
 
 def clean_numeric_signal(data):
     data = np.asarray(data, dtype=np.float64).reshape(-1)
-
     if data.size == 0:
         return data
 
     if np.any(~np.isfinite(data)):
         valid = np.isfinite(data)
-
         if not np.any(valid):
             return np.zeros_like(data, dtype=np.float64)
-
         x = np.arange(len(data))
         data = np.interp(x, x[valid], data[valid])
 
@@ -496,57 +809,44 @@ def local_baseline_norm(values, roll_max_at_idx):
     min_len = min(len(values), len(roll_max_at_idx))
     values = values[:min_len]
     roll_max_at_idx = roll_max_at_idx[:min_len]
-
     denominators = np.where(roll_max_at_idx > 0, roll_max_at_idx, 1.0)
     ratio = values / denominators
     ratio = ratio[np.isfinite(ratio)]
-
     if len(ratio) == 0:
         return 0.0
-
     return float(np.mean(ratio))
 
 
 def normalize_by_initial_baseline(signal, fps, baseline_sec=1.2):
     signal = clean_numeric_signal(signal)
-
     if len(signal) == 0:
         return signal, 1.0
-
     baseline_frames = max(1, int(fps * baseline_sec))
     baseline_frames = min(baseline_frames, len(signal))
-
     initial_values = signal[:baseline_frames]
     valid = initial_values[initial_values > 0]
-
     if len(valid) == 0:
         valid = signal[signal > 0]
-
     if len(valid) == 0:
         baseline = 1.0
     else:
         baseline = np.percentile(valid, 95)
-
         if not np.isfinite(baseline) or baseline <= 0:
             baseline = 1.0
-
     return signal / baseline, baseline
 
 
 # --- Core Analysis ---
 def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     cap = cv2.VideoCapture(video_path)
-
     if not cap.isOpened():
         return None, None, None, None
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
     if not np.isfinite(fps) or fps <= 0:
         fps = 30.0
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
     if total_frames <= 0:
         cap.release()
         return None, None, None, None
@@ -556,7 +856,6 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
 
     for frame_count in range(total_frames):
         ret, frame = cap.read()
-
         if not ret:
             break
 
@@ -580,8 +879,8 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
 
             if eye_box is not None:
                 x1, y1, x2, y2 = eye_box
-
                 h, w = frame.shape[:2]
+
                 x1 = max(0, min(x1, w - 1))
                 x2 = max(0, min(x2, w))
                 y1 = max(0, min(y1, h - 1))
@@ -592,7 +891,6 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
 
                     if eye_crop.size > 0:
                         input_tensor = preprocess_for_segmentation(eye_crop)
-
                         with torch.no_grad():
                             seg_output = seg_model(input_tensor)
 
@@ -750,6 +1048,7 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
         fps,
         config['BASELINE_WINDOW_SEC']
     )
+
     denoised_sig_interp_norm = denoised_sig_interp / interp_fixed_baseline
     roll_max_interp_norm = roll_max_interp / interp_fixed_baseline
 
@@ -809,7 +1108,6 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     ax1.set_ylim(0, 1.2)
     ax1.legend(loc='upper right')
     ax1.grid(True, alpha=0.3)
-
     plt.tight_layout()
 
     stats = {
@@ -838,10 +1136,166 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
     }
 
     return None, df, fig, stats
+def show_auth_page():
+    init_db()
+
+    st.markdown(
+        '<h1 class="main-header">👁 Mouse Blink Analysis</h1>',
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        '<p class="sub-header">Please log in or register to use the analysis platform.</p>',
+        unsafe_allow_html=True
+    )
+
+    if "auth_email_for_register" not in st.session_state:
+        st.session_state.auth_email_for_register = ""
+    if "verification_sent" not in st.session_state:
+        st.session_state.verification_sent = False
+
+    login_tab, register_tab = st.tabs(["Login", "Register"])
+
+    with login_tab:
+        st.markdown("### Login")
+
+        login_email = st.text_input(
+            "Email",
+            key="login_email"
+        )
+        login_password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password"
+        )
+
+        if st.button("Login", use_container_width=True):
+            if not login_email or not login_password:
+                st.warning("Please enter both email and password.")
+            else:
+                success, user, message = authenticate_user(login_email, login_password)
+                if success:
+                    st.session_state.authenticated = True
+                    st.session_state.user = user
+                    st.session_state.analysis_results = None
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+    with register_tab:
+        st.markdown("### Register")
+
+        register_email = st.text_input(
+            "Email",
+            key="register_email"
+        )
+
+        col_send, col_info = st.columns([1, 2])
+
+        with col_send:
+            if st.button("Send Verification Code", use_container_width=True):
+                normalized_email = register_email.strip().lower()
+
+                if not normalized_email:
+                    st.warning("Please enter your email first.")
+                elif not is_valid_email(normalized_email):
+                    st.warning("Please enter a valid email address.")
+                elif user_exists(normalized_email):
+                    st.warning("This email is already registered. Please log in.")
+                else:
+                    code = generate_verification_code()
+                    saved_ok = False
+
+                    try:
+                        save_verification_code(normalized_email, code)
+                        saved_ok = True
+                    except Exception as e:
+                        st.error(f"Could not save verification code: {e}")
+
+                    if saved_ok:
+                        sent_ok, send_message = send_verification_email(
+                            normalized_email,
+                            code
+                        )
+
+                        if sent_ok:
+                            st.session_state.auth_email_for_register = normalized_email
+                            st.session_state.verification_sent = True
+                            st.success(send_message)
+                        else:
+                            st.error(send_message)
+
+        with col_info:
+            st.caption("The verification code is valid for 10 minutes.")
+
+        verification_code = st.text_input(
+            "Verification Code",
+            key="register_code"
+        )
+        register_password = st.text_input(
+            "Password",
+            type="password",
+            key="register_password"
+        )
+        register_password_confirm = st.text_input(
+            "Confirm Password",
+            type="password",
+            key="register_password_confirm"
+        )
+
+        if st.button("Create Account", use_container_width=True):
+            normalized_email = register_email.strip().lower()
+
+            if not normalized_email:
+                st.warning("Please enter your email.")
+            elif not is_valid_email(normalized_email):
+                st.warning("Please enter a valid email address.")
+            elif not verification_code:
+                st.warning("Please enter the verification code.")
+            elif not register_password or not register_password_confirm:
+                st.warning("Please enter your password twice.")
+            elif register_password != register_password_confirm:
+                st.warning("The two passwords do not match.")
+            elif len(register_password) < 6:
+                st.warning("Password must be at least 6 characters.")
+            else:
+                code_ok, code_message = check_verification_code(
+                    normalized_email,
+                    verification_code
+                )
+
+                if not code_ok:
+                    st.error(code_message)
+                else:
+                    success, message = register_user(
+                        normalized_email,
+                        register_password
+                    )
+
+                    if success:
+                        st.success(message)
+                        st.session_state.verification_sent = False
+                        st.session_state.auth_email_for_register = ""
+                    else:
+                        st.error(message)
 
 
 # --- Main App ---
 def show_main_app():
+    init_db()
+
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "user" not in st.session_state:
+        st.session_state.user = None
+
+    if not st.session_state.authenticated or st.session_state.user is None:
+        show_auth_page()
+        return
+
+    current_user = st.session_state.user
+    current_user_id = current_user["id"]
+
     st.markdown(
         '<h1 class="main-header">👁 Mouse Blink Analysis</h1>',
         unsafe_allow_html=True
@@ -856,8 +1310,17 @@ def show_main_app():
 
     with st.sidebar:
         st.markdown("---")
-        st.markdown("### Upload Video")
+        st.markdown("### Account")
+        st.caption(f"Logged in as: {current_user['email']}")
 
+        if st.button("Logout", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.user = None
+            st.session_state.analysis_results = None
+            st.rerun()
+
+        st.markdown("---")
+        st.markdown("### Upload Video")
         uploaded_file = st.file_uploader(
             "Select a video file",
             type=["mp4", "avi", "mov"],
@@ -951,8 +1414,12 @@ def show_main_app():
                     }
 
                     try:
-                        save_results_to_db(uploaded_file.name, stats)
-                        st.success("Analysis complete and saved to history.")
+                        save_results_to_db(
+                            current_user_id,
+                            uploaded_file.name,
+                            stats
+                        )
+                        st.success("Analysis complete and saved to your history.")
                     except Exception as e:
                         st.warning(f"Could not save to database: {e}")
                 else:
@@ -1003,7 +1470,6 @@ def show_main_app():
             )
 
         st.markdown("---")
-
         st.markdown("### Signal Processing Visualization")
         st.pyplot(results_fig)
 
@@ -1020,7 +1486,6 @@ def show_main_app():
         )
 
         st.markdown("### Frame-by-Frame Data")
-
         with st.expander("View detailed data", expanded=False):
             st.dataframe(results_df, use_container_width=True)
 
@@ -1028,7 +1493,7 @@ def show_main_app():
     st.markdown("### Analysis History")
 
     init_db()
-    history_df = load_results_from_db()
+    history_df = load_results_from_db(current_user_id)
 
     if not history_df.empty:
         display_df = history_df.copy()
@@ -1069,6 +1534,41 @@ def show_main_app():
 
         st.dataframe(display_df, use_container_width=True)
 
+        st.markdown("#### Delete Records")
+
+        record_options = display_df["ID"].tolist()
+
+        selected_record_ids = st.multiselect(
+            "Select records to delete",
+            options=record_options,
+            help="Only your own records are shown and can be deleted."
+        )
+
+        delete_col1, delete_col2 = st.columns([1, 3])
+
+        with delete_col1:
+            delete_button = st.button(
+                "Delete Selected",
+                disabled=(len(selected_record_ids) == 0),
+                use_container_width=True
+            )
+
+        with delete_col2:
+            if selected_record_ids:
+                st.caption(f"{len(selected_record_ids)} record(s) selected.")
+
+        if delete_button:
+            success, message = delete_analysis_records(
+                current_user_id,
+                selected_record_ids
+            )
+
+            if success:
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+
         csv_buffer = BytesIO()
         display_df.to_csv(csv_buffer, index=False, encoding='utf-8-sig')
         csv_buffer.seek(0)
@@ -1080,6 +1580,7 @@ def show_main_app():
             "text/csv",
             use_container_width=True
         )
+
     else:
         st.info("No analysis history yet. Upload a video to get started.")
 
