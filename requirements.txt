@@ -5,9 +5,10 @@ matplotlib>=3.7.0
 scipy>=1.11.0
 PyWavelets>=1.4.0
 tqdm>=4.66.0
-opencv-python-headless>=4.10.0.84
+pillow>=10.0.0
 torch>=2.0.0
 torchvision>=0.15.0
 ultralytics>=8.0.0
 segmentation_models_pytorch>=0.3.0
-bcrypt
+bcrypt>=4.0.0
+opencv-python-headless>=4.8.1.78

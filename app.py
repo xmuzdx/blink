@@ -4,38 +4,30 @@ Integrates advanced signal processing from core.py with Anthropic-inspired warm 
 
 """
 
-import cv2
-import numpy as np
-import torch
-import torchvision.transforms as T
-import pandas as pd
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from ultralytics import YOLO
 import os
-import streamlit as st
-import tempfile
-from io import BytesIO
-import sqlite3
-from datetime import datetime
-import pywt
-import warnings
-from scipy.signal import find_peaks
-
-# --- Auth imports ---
-import re
-import time
 import random
-import string
+import re
 import smtplib
+import sqlite3
 import ssl
-from email.mime.text import MIMEText
+import string
+import tempfile
+import time
+import warnings
+from datetime import datetime
 from email.mime.multipart import MIMEMultipart
-import bcrypt
+from email.mime.text import MIMEText
+from io import BytesIO
 
+# Reduce native-thread pressure before importing scientific stacks.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
+os.environ.setdefault("YOLO_VERBOSE", "False")
 
-# --- Page Config ---
+import streamlit as st
+
+# Must be the first Streamlit command.
 st.set_page_config(
     layout="wide",
     page_title="Mouse Blink Analysis",
@@ -207,14 +199,31 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# --- Import custom segmentation model ---
+# Light packages only at import time. torch / OpenCV / YOLO are loaded lazily
+# so a Cloud libGL or RAM failure does not take down the login page.
+_IMPORT_ERROR = None
 try:
-    from ME_FPN_model import FPN as MyCustomFPN
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    import pywt
+    from scipy.signal import find_peaks
 except Exception as e:
-    st.error(f"ERROR: Could not import custom model. Details: {e}")
+    _IMPORT_ERROR = e
+    plt = None
+    np = None
+    pd = None
+    pywt = None
+    find_peaks = None
 
-    class MyCustomFPN:
-        pass
+try:
+    import bcrypt
+    _BCRYPT_ERROR = None
+except Exception as e:
+    bcrypt = None
+    _BCRYPT_ERROR = e
 
 
 # --- Global Constants ---
@@ -285,7 +294,7 @@ def generate_verification_code():
 
 def send_verification_email(to_email, code):
     smtp_host = str(get_secret("SMTP_HOST", "")).strip()
-    smtp_port = int(get_secret("SMTP_PORT", "587"))
+    smtp_port = int(str(get_secret("SMTP_PORT", "587") or "587"))
     smtp_user = str(get_secret("SMTP_USER", "")).strip()
     smtp_password = str(get_secret("SMTP_PASSWORD", "")).strip()
     smtp_from = str(get_secret("SMTP_FROM", smtp_user)).strip()
@@ -639,15 +648,19 @@ def delete_analysis_records(user_id, record_ids):
         conn.close()
 
 
+_MODEL_LOAD_ERRORS = {}
+
+
 # --- Model Loading ---
 @st.cache_resource
 def load_detection_model(path):
     if not os.path.exists(path):
         return None
     try:
+        from ultralytics import YOLO
         return YOLO(path)
     except Exception as e:
-        st.error(f"Could not load YOLO detection model: {e}")
+        _MODEL_LOAD_ERRORS["yolo"] = str(e)
         return None
 
 
@@ -656,25 +669,36 @@ def load_segmentation_model(path):
     if not os.path.exists(path):
         return None
     try:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        import torch
+        from ME_FPN_model import FPN as MyCustomFPN
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = MyCustomFPN(
             encoder_name="resnet34",
             encoder_weights=None,
             classes=1,
             in_channels=3
         )
-        model.load_state_dict(torch.load(path, map_location=device))
+        try:
+            state = torch.load(path, map_location=device, weights_only=True)
+        except Exception:
+            state = torch.load(path, map_location=device, weights_only=False)
+        model.load_state_dict(state)
         model.to(device)
         model.eval()
         return model
     except Exception as e:
-        st.error(f"Could not load segmentation model: {e}")
+        _MODEL_LOAD_ERRORS["seg"] = str(e)
         return None
 
 
 # --- Core Functions ---
 def preprocess_for_segmentation(eye_crop, input_size=(256, 256)):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    import cv2
+    import torch
+    import torchvision.transforms as T
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     img = cv2.cvtColor(eye_crop, cv2.COLOR_BGR2RGB)
     transform = T.Compose([
         T.ToPILImage(),
@@ -689,6 +713,8 @@ def preprocess_for_segmentation(eye_crop, input_size=(256, 256)):
 
 
 def postprocess_segmentation(output_mask, original_crop_shape, seg_threshold):
+    import cv2
+
     mask_numpy = output_mask.squeeze().cpu().detach().numpy()
     probabilities = 1 / (1 + np.exp(-mask_numpy))
     probabilities_resized = cv2.resize(
@@ -838,6 +864,9 @@ def normalize_by_initial_baseline(signal, fps, baseline_sec=1.2):
 
 # --- Core Analysis ---
 def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
+    import cv2
+    import torch
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None, None, None, None
@@ -1137,6 +1166,11 @@ def run_analysis(video_path, original_filename, yolo_model, seg_model, config):
 
     return None, df, fig, stats
 def show_auth_page():
+    if _BCRYPT_ERROR is not None:
+        st.error("Password library failed to import. Check that `bcrypt` is in requirements.txt.")
+        st.exception(_BCRYPT_ERROR)
+        return
+
     init_db()
 
     st.markdown(
@@ -1282,6 +1316,14 @@ def show_auth_page():
 
 # --- Main App ---
 def show_main_app():
+    if _IMPORT_ERROR is not None:
+        st.error(
+            "App dependencies failed to import. On Streamlit Cloud this is usually "
+            "a missing package."
+        )
+        st.exception(_IMPORT_ERROR)
+        return
+
     init_db()
 
     if "authenticated" not in st.session_state:
@@ -1328,7 +1370,10 @@ def show_main_app():
         )
 
         if uploaded_file is not None:
-            st.session_state.analysis_results = None
+            file_id = f"{uploaded_file.name}:{uploaded_file.size}"
+            if st.session_state.get("_active_upload") != file_id:
+                st.session_state._active_upload = file_id
+                st.session_state.analysis_results = None
 
         st.markdown("---")
         st.markdown("### Analysis Parameters")
@@ -1382,11 +1427,17 @@ def show_main_app():
                     seg_model = load_segmentation_model(SEG_MODEL_FILENAME)
 
                 if yolo_model is None:
+                    extra = _MODEL_LOAD_ERRORS.get("yolo")
                     st.error(f"YOLO model not found or failed to load: {YOLO_MODEL_FILENAME}")
+                    if extra:
+                        st.caption(extra)
                     return
 
                 if seg_model is None:
+                    extra = _MODEL_LOAD_ERRORS.get("seg")
                     st.error(f"Segmentation model not found or failed to load: {SEG_MODEL_FILENAME}")
+                    if extra:
+                        st.caption(extra)
                     return
 
                 config = {
